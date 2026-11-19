@@ -12,13 +12,14 @@
 - 层级配置：memtable 不同键容量、SSTable 合并触发数、层级上限、最终完整合并开关。
 - 合并队列：创建试验时持久化输入及配置快照，Redis 分发，独立 worker 执行并记录状态。
 - 读放大证据：显示合并前后层级、读写放大、真实存活键、Oracle 摘要、刷盘/合并轨迹、JSON 导出。
+- 读错缩减工坊：选批次、配置与模拟故障，找出仍能重现首处读错的最短操作子序列；可限重放次数、续跑、追加额度并重放样本。
 - 管理员审计：记录写操作账号、路由与 HTTP 结果，包含权限拒绝。
 
 | 角色 | 页面与权限 | 典型动作 |
 |---|---|---|
 | admin 管理员 | 全业务页面与审计 | 登记批次/配置、执行、导出、查看审计 |
-| operator 操作员 | 四业务页面，不可看管理员审计 | 新建输入与配置、提交 worker、检查与下载结果 |
-| viewer 观察员 | 四业务页面只读与导出 | 阅读层级和 Oracle 证据，写请求在 API 层403 |
+| operator 操作员 | 五业务页面，不可看管理员审计 | 新建输入与配置、提交 worker、检查与下载结果、发起缩减 |
+| viewer 观察员 | 五业务页面只读与导出 | 阅读层级、Oracle 证据与复现样本，写请求在 API 层403 |
 
 ## 启动与账号
 
@@ -48,7 +49,9 @@ docker compose down -v --remove-orphans
 5. 09:20 创建试验并提交worker，在队列刷新至“Oracle一致”。
 6. 09:25 打开读放大证据，确认早班输入最终6个存活键，sensor-02/03未复活。
 7. 09:30 下载 `lsm-trial-<id>.json`，包含操作/配置快照、层级、轨迹与校验和。
-8. 09:40 viewer复核，创建试验被403拒绝；10:00 admin检查操作审计。
+8. 09:35 打开“读错缩减”：选同一批次、配置与模拟故障“层级合并丢弃墓碑”，把重放上限设为50，观察额度用完时保存的样本与“最短未证”。
+9. 09:45 追加额度续跑至“已证最短”，点“重放当前样本”，确认阶段、键、期望值与实读值与目标一致。
+10. 09:50 下载 `lsm-reduction-<id>.json`；09:55 viewer复核，发起缩减与追加额度均被403拒绝；10:00 admin检查操作审计。
 
 Seed另含“旧值复活回归集”和“全部删除边界集”；配置另含“保留层级观测”和“宽缓冲-完整合并”。账户、批次、配置以自然键查缺插入，重复seed不改变已存在字段。
 
@@ -65,7 +68,15 @@ Seed另含“旧值复活回归集”和“全部删除边界集”；配置另�
 - 读放大 = 固定点查集合的范围命中SSTable读取总数 / 探测键数；合并前后使用相同集合。写放大 = flush/各次compaction真实输出条目总数 / 用户操作数，**不是物理字节或磁盘I/O**。
 - Python另从原始操作顺序构造最后写入字典Oracle；合并前、合并后均必须与Oracle一致，否则试验failed。结果与Oracle各自对有序JSON求SHA-256；同输入/配置结果确定，无随机时钟项。
 
-输出包括真实计算的层级表数/键范围/墓碑数、每步刷盘合并轨迹、输入键数、存活键、写出条目、读写放大、Oracle及实际键值、摘要。空输入和超限在提交时422，引用不存在404，重名409，排队/运行总数超过20时429；worker失败保存error和failed状态。
+### 读错缩减口径
+
+- 模拟故障只作用于缩减演练，原合并试验始终走严格 Oracle 校验：`drop_tombstones_in_tiered`（层级合并丢弃墓碑）、`keep_stale_version_in_tiered`（层级合并保留旧版本）、`read_oldest_version`（点查取最旧版本）、`drop_latest_in_final_compaction`（最终完整合并丢弃最新写，仅在最终合并之后可见）。
+- 目标读错取完整批次的第一处偏差：阶段（最终完整合并之前/之后）、键、期望值、实读值。缩减样本必须四项完全一致。
+- 收缩阶段按块贪心删除不被需要的操作；随后枚举所有更短子序列证明最短。每个不同候选（按有序 JSON 求 SHA-256 判重）每次缩减只重放一次、只扣一次额度；中断或续跑复用缓存，同一候选不重复扣次数。
+- 重放额度按任务累计计数，可创建时设定并追加；额度用完状态为 `exhausted`，保留当前样本，`proven_shortest` 为假。已证最短后不可再追加。
+- 任务在 worker 中按固定分片执行并逐候选落盘游标，进程中断后可从数据库状态继续。
+
+输出包括真实计算的层级表数/键范围/墓碑数、每步刷盘合并轨迹、输入键数、存活键、写出条目、读写放大、Oracle及实际键值、摘要。空输入和超限在提交时422，引用不存在404，重名409，排队/运行总数超过20时429；worker失败保存error和failed状态。缩减任务创建时若该故障下完整批次无读错也返回422。
 
 ## 技术栈与代码组织
 
@@ -74,10 +85,10 @@ Seed另含“旧值复活回归集”和“全部删除边界集”；配置另�
 | frontend | 原生HTML/CSS/JS ES模块，Nginx1.27，土橙材料样本册视觉 |
 | backend | Python3.11、FastAPI、SQLAlchemy、PyMySQL、JWT与PBKDF2密码 |
 | worker | 独立Python进程，Redis BLPOP，LSM演算，数据库恢复队列，心跳健康检查 |
-| db | MySQL8.0，持久化3个业务实体、用户与审计 |
+| db | MySQL8.0，持久化4个业务实体、用户与审计 |
 | redis | Redis7，异步队列与持久卷 |
 
-`backend/src/`分为config/models/schemas/services/controllers/routes/middlewares/utils/constants；`backend/scripts/seed_demo.py`种子与初始化；`backend/migrations/README.md`为schema v1说明。3实体dataset/config/trial各自贯穿model/schema/service/route、前端api/store/page。试验结果保存在Trial JSON字段中，详情页为独立业务页面。
+`backend/src/`分为config/models/schemas/services/controllers/routes/middlewares/utils/constants；`backend/scripts/seed_demo.py`种子与初始化；`backend/migrations/README.md`为schema v1说明。4实体dataset/config/trial/reduction各自贯穿model/schema/service/route、前端api/store/page。试验结果保存在Trial JSON字段中，详情页为独立业务页面；缩减任务同样保存输入快照、目标读错、搜索游标与结果。
 
 `frontend/src/`包含api/stores/types/components/common/hooks/pages/router/utils/constants，表格/状态/页头跨页共享，HTML转义与反馈工具复用。角色/任务状态/操作类型枚举在`backend/src/constants/enums.py`和`frontend/src/constants/enums.js`。模型默认任务状态使用后端枚举，前端状态组件使用前端枚举。
 

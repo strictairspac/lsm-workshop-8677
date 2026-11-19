@@ -1,1 +1,1 @@
-import{STATUSES}from'../../constants/enums.js';import{esc}from'../../utils/html.js';export const badge=s=>'<span class="badge '+esc(s)+'">'+esc(STATUSES[s]||s)+'</span>';
+import{STATUSES,REDUCTION_STATUSES}from'../../constants/enums.js';import{esc}from'../../utils/html.js';export const badge=(s,labels=STATUSES)=>'<span class="badge '+esc(s)+'">'+esc(labels[s]||s)+'</span>';export const reductionBadge=s=>badge(s,REDUCTION_STATUSES);

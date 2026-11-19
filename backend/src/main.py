@@ -5,7 +5,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
 from .config.database import engine
-from .routes import auth,dataset,config,trial,audit
+from .routes import auth,dataset,config,trial,audit,reduction
+from . import models  # noqa: F401  register every model with Base.metadata
 from .middlewares.audit import AuditMiddleware
 from .middlewares.request_id import RequestIdMiddleware
 from .services.trial import queue
@@ -28,4 +29,4 @@ async def db_error(request:Request,exc):
 def health():
     with engine.connect() as c:c.execute(text('SELECT 1'))
     queue.ping();return {'status':'ok'}
-for router in (auth.router,dataset.router,config.router,trial.router,audit.router):app.include_router(router)
+for router in (auth.router,dataset.router,config.router,trial.router,audit.router,reduction.router):app.include_router(router)
